@@ -1,0 +1,107 @@
+<?xml version="1.0"?>
+<!--
+  Barco com motor: o WAM-V do MBZIRC com dois motores (esquerdo e direito).
+
+  Baseado no modelo "usv" do MBZIRC (mbzirc_ign/models/usv/model.sdf.erb), com
+  duas diferenças:
+    - sem braço, sensores extra nem plugins da competição;
+    - Hydrodynamics do Gazebo em vez do SimpleHydrodynamics do MBZIRC,
+      para o barco sentir a corrente (/ocean_current).
+
+  Comandos (Gazebo), força em newtons, positiva = para a frente:
+    /model/<nome>/joint/left_engine_propeller_joint/cmd_thrust   (ignition.msgs.Double)
+    /model/<nome>/joint/right_engine_propeller_joint/cmd_thrust  (ignition.msgs.Double)
+  <nome> é o nome dado ao barco no mundo (por exemplo, barco_1).
+-->
+<sdf version="1.9">
+  <model name="barco_motor">
+    <static>false</static>
+
+    <!-- Casco, motores e hélices (links e joints) do modelo base do MBZIRC.
+         merge="true" junta-os diretamente neste modelo, como se estivessem escritos aqui. -->
+    <include merge="true">
+      <uri>model://mbzirc_usv_base</uri>
+    </include>
+
+    <!-- ============ Propulsão ============ -->
+    <!-- Cada Thruster recebe uma força (N) e faz rodar a hélice à velocidade que
+         produz essa força. max_thrust_cmd = metade da força para 8 nós (valor do MBZIRC). -->
+    <plugin filename="ignition-gazebo-thruster-system"
+            name="ignition::gazebo::systems::Thruster">
+      <joint_name>left_engine_propeller_joint</joint_name>
+      <thrust_coefficient>0.004422</thrust_coefficient>
+      <fluid_density>1000</fluid_density>
+      <propeller_diameter>0.2</propeller_diameter>
+      <velocity_control>true</velocity_control>
+      <max_thrust_cmd>718.6</max_thrust_cmd>
+      <min_thrust_cmd>-718.6</min_thrust_cmd>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-thruster-system"
+            name="ignition::gazebo::systems::Thruster">
+      <joint_name>right_engine_propeller_joint</joint_name>
+      <thrust_coefficient>0.004422</thrust_coefficient>
+      <fluid_density>1000</fluid_density>
+      <propeller_diameter>0.2</propeller_diameter>
+      <velocity_control>true</velocity_control>
+      <max_thrust_cmd>718.6</max_thrust_cmd>
+      <min_thrust_cmd>-718.6</min_thrust_cmd>
+    </plugin>
+
+    <!-- Os motores podem rodar sobre o eixo vertical. Estes controladores mantêm-nos
+         direitos (posição 0); o barco vira por diferença de força entre os motores. -->
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>left_chassis_engine_joint</joint_name>
+      <use_velocity_commands>true</use_velocity_commands>
+    </plugin>
+
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>right_chassis_engine_joint</joint_name>
+      <use_velocity_commands>true</use_velocity_commands>
+    </plugin>
+
+    <!-- ============ Flutuação nas ondas ============ -->
+    <!-- Mesmos valores do WAM-V do MBZIRC; ondas iguais às do modelo "waves". -->
+    <plugin filename="libSurface.so"
+            name="ignition::gazebo::systems::Surface">
+      <link_name>base_link</link_name>
+      <vehicle_length>6</vehicle_length>
+      <vehicle_width>3.3</vehicle_width>
+      <hull_radius>0.27</hull_radius>
+      <fluid_level>0.45</fluid_level>
+      <wavefield>
+        <size>1000 1000</size>
+        <cell_count>50 50</cell_count>
+        <wave>
+          <model>PMS</model>
+          <period>5</period>
+          <number>3</number>
+          <scale>1.1</scale>
+          <gain>0.3</gain>
+          <direction>1 0</direction>
+          <angle>0.4</angle>
+          <tau>2.0</tau>
+          <amplitude>0.0</amplitude>
+          <steepness>0.0</steepness>
+        </wave>
+      </wavefield>
+    </plugin>
+
+    <!-- ============ Arrasto + corrente ============ -->
+    <!-- Coeficientes do WAM-V do MBZIRC com o sinal trocado (convenção do Gazebo). -->
+    <plugin filename="ignition-gazebo-hydrodynamics-system"
+            name="ignition::gazebo::systems::Hydrodynamics">
+      <link_name>base_link</link_name>
+      <xU>-51.3</xU>
+      <xUabsU>-72.4</xUabsU>
+      <yV>-40.0</yV>
+      <zW>-500.0</zW>
+      <kP>-100.0</kP>
+      <mQ>-100.0</mQ>
+      <nR>-400.0</nR>
+      <default_current>0.5 0 0</default_current>
+    </plugin>
+  </model>
+</sdf>
