@@ -3,7 +3,7 @@ import math
 
 from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from missao.geometria import (mundo_para_corpo, normalizar_angulo, saturar,
-                              saturar_vetor, yaw_de_quaternion)
+                              velocidade_desejada, yaw_de_quaternion)
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -57,6 +57,7 @@ class DroneMissao(Node):
         self.t_pose = None
         self.objetivo = None
         self.t_chegada = None
+        self.ja_voou = False
         self.estado = POUSADO
         self.create_timer(1.0 / self.p('frequencia'), self.ciclo)
         self.get_logger().info(f'Pronto; objetivos em /{drone}/objetivo')
@@ -102,9 +103,12 @@ class DroneMissao(Node):
         altitude = self.p('altitude')
 
         if self.estado == POUSADO:
-            self.publicar(0.0, 0.0, 0.0, 0.0)
+            # Com os motores já ligados, velocidade zero deixa-o pairar e subir aos poucos.
+            vz = -self.p('velocidade_aterrar') if self.ja_voou else 0.0
+            self.publicar(0.0, 0.0, vz, 0.0)
 
         elif self.estado == DESCOLAR:
+            self.ja_voou = True
             vz = saturar(self.p('ganho_altitude') * (altitude - pos.z),
                          self.p('velocidade_vertical'))
             self.publicar(0.0, 0.0, vz, 0.0)
@@ -131,13 +135,12 @@ class DroneMissao(Node):
                 (self.p('base_x'), self.p('base_y')), pos)
             self.publicar(vx, vy, -self.p('velocidade_aterrar'), 0.0, yaw)
             if pos.z < self.p('altura_base') + self.p('margem_pouso'):
-                self.publicar(0.0, 0.0, 0.0, 0.0)
                 self.mudar_estado(POUSADO)
 
     def velocidade_horizontal(self, alvo, pos):
-        k = self.p('ganho_posicao')
-        return saturar_vetor(k * (alvo[0] - pos.x), k * (alvo[1] - pos.y),
-                             self.p('velocidade_cruzeiro'))
+        return velocidade_desejada(pos.x, pos.y, alvo[0], alvo[1],
+                                   self.p('ganho_posicao'),
+                                   self.p('velocidade_cruzeiro'))
 
     def voar_para(self, alvo, altitude, pos, yaw):
         """Comanda um passo em direção ao alvo; devolve True se já chegou."""

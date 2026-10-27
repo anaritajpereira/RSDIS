@@ -1,6 +1,9 @@
 """Máquina de estados do barco robô (fase 1: ir a uma coordenada)."""
+import math
+
 from geometry_msgs.msg import PointStamped, PoseStamped, Twist
-from missao.geometria import comando_rumo, yaw_de_quaternion
+from missao.geometria import (comando_vetorial, velocidade_desejada,
+                              yaw_de_quaternion)
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -18,10 +21,14 @@ class BarcoMissao(Node):
         parametros = {
             'barco': 'barco_1',
             'velocidade_max': 2.5,
-            'ganho_velocidade': 0.3,
+            'ganho_velocidade': 0.15,
+            'ganho_correcao': 1.0,
+            'filtro_velocidade': 0.2,
             'ganho_rumo': 1.0,
-            'rotacao_max': 0.5,
-            'tolerancia_chegada': 3.0,
+            'rotacao_max': 0.8,
+            'erro_rumo_max': 0.8,
+            'velocidade_minima': 0.2,
+            'tolerancia_chegada': 5.0,
             'histerese': 5.0,
             'timeout_pose': 1.0,
             'frequencia': 10.0,
@@ -39,6 +46,8 @@ class BarcoMissao(Node):
 
         self.pose = None
         self.t_pose = None
+        self.anterior = None
+        self.velocidade = (0.0, 0.0)
         self.objetivo = None
         self.estado = AGUARDAR
         self.create_timer(1.0 / self.p('frequencia'), self.ciclo)
@@ -54,6 +63,19 @@ class BarcoMissao(Node):
     def ao_receber_pose(self, msg):
         self.pose = msg.pose
         self.t_pose = self.get_clock().now()
+
+        # O casco tem muita inércia e escorrega de lado: o controlo usa a velocidade medida.
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        x, y = msg.pose.position.x, msg.pose.position.y
+        if self.anterior is not None:
+            xa, ya, ta = self.anterior
+            dt = t - ta
+            if dt > 0.0:
+                a = self.p('filtro_velocidade')
+                vx, vy = self.velocidade
+                self.velocidade = (a * (x - xa) / dt + (1 - a) * vx,
+                                   a * (y - ya) / dt + (1 - a) * vy)
+        self.anterior = (x, y, t)
 
     def ao_receber_objetivo(self, msg):
         self.objetivo = (msg.point.x, msg.point.y)
@@ -79,23 +101,30 @@ class BarcoMissao(Node):
 
         pos = self.pose.position
         o = self.pose.orientation
-        avanco, rotacao, distancia = comando_rumo(
-            pos.x, pos.y, yaw_de_quaternion(o.x, o.y, o.z, o.w),
-            self.objetivo[0], self.objetivo[1],
-            self.p('ganho_rumo'), self.p('ganho_velocidade'),
-            self.p('velocidade_max'), self.p('rotacao_max'))
+        alvo_x, alvo_y = self.objetivo
+        distancia = math.hypot(alvo_x - pos.x, alvo_y - pos.y)
 
-        if self.estado == NAVEGAR:
-            if distancia < self.p('tolerancia_chegada'):
-                self.mudar_estado(CHEGOU)
-                self.publicar(0.0, 0.0)
-            else:
-                self.publicar(avanco, rotacao)
-        elif self.estado == CHEGOU:
-            self.publicar(0.0, 0.0)
-            # A corrente afasta o barco; a histerese evita arrancar e parar sem fim.
-            if distancia > self.p('tolerancia_chegada') + self.p('histerese'):
-                self.mudar_estado(NAVEGAR)
+        if self.estado == NAVEGAR and distancia < self.p('tolerancia_chegada'):
+            self.mudar_estado(CHEGOU)
+        elif (self.estado == CHEGOU and distancia
+              > self.p('tolerancia_chegada') + self.p('histerese')):
+            self.mudar_estado(NAVEGAR)
+
+        # O controlo é o mesmo nos dois estados: em CHEGOU continua a segurar o
+        # ponto contra a corrente.
+        vdx, vdy = velocidade_desejada(
+            pos.x, pos.y, alvo_x, alvo_y, self.p('ganho_velocidade'),
+            self.p('velocidade_max'))
+        # Proa para vd + k·(vd − v): anula a derrapagem lateral e a corrente.
+        k = self.p('ganho_correcao')
+        vx, vy = self.velocidade
+        avanco, rotacao = comando_vetorial(
+            yaw_de_quaternion(o.x, o.y, o.z, o.w),
+            vdx + k * (vdx - vx), vdy + k * (vdy - vy),
+            self.p('ganho_rumo'), self.p('velocidade_max'),
+            self.p('rotacao_max'), self.p('erro_rumo_max'),
+            self.p('velocidade_minima'))
+        self.publicar(avanco, rotacao)
 
         self.get_logger().info(
             f'{self.estado}: distância {distancia:.1f} m',
