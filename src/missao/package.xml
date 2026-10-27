@@ -3,7 +3,7 @@
 <package format="3">
   <name>missao</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Busca e salvamento marítimo multi-robô (drone + barco robô).</description>
   <maintainer email="anarita.j.pereira@gmail.com">arjp</maintainer>
   <license>TODO: License declaration</license>
 
@@ -11,6 +11,11 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>tf2_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ros_ign_bridge</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

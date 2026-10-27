@@ -1,6 +1,8 @@
-build/
-install/
-log/
-__pycache__/
-*.pyc
-.vscode/
+# Ignorar tudo nesta pasta
+*
+
+# ...exceto estes ficheiros
+!.gitignore
+!oceano_corrente/
+!src/
+!teleop_twist_keyboard/
