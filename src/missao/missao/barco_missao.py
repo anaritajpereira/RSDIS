@@ -1,9 +1,10 @@
-"""Máquina de estados do barco robô (fase 1: ir a uma coordenada)."""
+"""Máquina de estados do barco robô (fase 2: seguir a última posição do alvo)."""
 import math
 
 from geometry_msgs.msg import PointStamped, PoseStamped, Twist
-from missao.geometria import (comando_vetorial, velocidade_desejada,
-                              yaw_de_quaternion)
+from missao.geometria import (comando_vetorial, ponto_a_distancia,
+                              velocidade_desejada, yaw_de_quaternion)
+from missao_interfaces.msg import DetecaoAlvo
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -14,7 +15,7 @@ CHEGOU = 'CHEGOU'
 
 
 class BarcoMissao(Node):
-    """Leva o barco robô a um ponto através de /<barco>/cmd_vel."""
+    """Leva o barco robô para junto do alvo (ou de um ponto) por /<barco>/cmd_vel."""
 
     def __init__(self):
         super().__init__('barco_missao')
@@ -23,15 +24,19 @@ class BarcoMissao(Node):
             'velocidade_max': 2.5,
             'ganho_velocidade': 0.15,
             'ganho_correcao': 1.0,
-            'filtro_velocidade': 0.2,
+            'filtro_velocidade': 0.2,  # peso da medida nova (0 a 1)
             'ganho_rumo': 1.0,
             'rotacao_max': 0.8,
             'erro_rumo_max': 0.8,
             'velocidade_minima': 0.2,
             'tolerancia_chegada': 5.0,
-            'histerese': 5.0,
+            'histerese': 5.0,  # para não andar sempre a trocar NAVEGAR/CHEGOU
             'timeout_pose': 1.0,
             'frequencia': 10.0,
+            # o barco_2 tem uns 22 m de comprimento, 20 m do centro chega para não bater
+            'seguir_alvo': True,
+            'distancia_seguranca': 20.0,
+            'confianca_min': 0.3,
         }
         for nome, valor in parametros.items():
             self.declare_parameter(nome, valor)
@@ -44,15 +49,19 @@ class BarcoMissao(Node):
             PoseStamped, f'/{barco}/pose_mundo', self.ao_receber_pose, 10)
         self.create_subscription(
             PointStamped, f'/{barco}/objetivo', self.ao_receber_objetivo, 10)
+        self.create_subscription(
+            DetecaoAlvo, '/alvo/detecao', self.ao_receber_detecao, 10)
 
         self.pose = None
         self.instante_pose = None
         self.pose_anterior = None
         self.velocidade_medida = (0.0, 0.0)
         self.objetivo = None
+        self.alvo = None
         self.estado = AGUARDAR
         self.create_timer(1.0 / self.param('frequencia'), self.ciclo)
-        self.get_logger().info(f'Pronto; objetivos em /{barco}/objetivo')
+        self.get_logger().info(
+            f'Pronto; segue /alvo/detecao ou objetivos em /{barco}/objetivo')
 
     def param(self, nome):
         return self.get_parameter(nome).value
@@ -65,7 +74,8 @@ class BarcoMissao(Node):
         self.pose = msg.pose
         self.instante_pose = self.get_clock().now()
 
-        # O casco tem muita inércia e escorrega de lado: o controlo usa a velocidade medida.
+        # o WAM-V escorrega muito de lado, por isso estimamos a velocidade real a
+        # partir das poses (diferenças com um filtro passa-baixo simples)
         instante = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         x, y = msg.pose.position.x, msg.pose.position.y
         if self.pose_anterior is not None:
@@ -82,11 +92,22 @@ class BarcoMissao(Node):
         self.pose_anterior = (x, y, instante)
 
     def ao_receber_objetivo(self, msg):
+        # objetivo manual ganha ao alvo até chegar outra deteção (útil para testes)
+        self.alvo = None
         self.objetivo = (msg.point.x, msg.point.y)
         self.get_logger().info(
             f'Novo objetivo: ({msg.point.x:.1f}, {msg.point.y:.1f})')
         if self.estado != NAVEGAR:
             self.mudar_estado(NAVEGAR)
+
+    def ao_receber_detecao(self, msg):
+        if not self.param('seguir_alvo') or msg.confianca < self.param('confianca_min'):
+            return
+        if self.alvo is None:
+            self.get_logger().info(f'A seguir o alvo em ({msg.x:.1f}, {msg.y:.1f})')
+            if self.estado != NAVEGAR:
+                self.mudar_estado(NAVEGAR)
+        self.alvo = (msg.x, msg.y)
 
     def pose_valida(self):
         if self.pose is None:
@@ -97,6 +118,11 @@ class BarcoMissao(Node):
 
     def ciclo(self):
         self.pub_estado.publish(String(data=self.estado))
+        # o alvo está sempre a mexer-se, por isso o objetivo é recalculado a cada ciclo
+        if self.pose is not None and self.alvo is not None:
+            self.objetivo = ponto_a_distancia(
+                self.alvo[0], self.alvo[1], self.pose.position.x,
+                self.pose.position.y, self.param('distancia_seguranca'))
         if self.objetivo is None or not self.pose_valida():
             if self.objetivo is not None:
                 self.get_logger().warning('Sem pose recente do barco',
@@ -115,12 +141,14 @@ class BarcoMissao(Node):
               > self.param('tolerancia_chegada') + self.param('histerese')):
             self.mudar_estado(NAVEGAR)
 
-        # O controlo é o mesmo nos dois estados: em CHEGOU continua a segurar o
-        # ponto contra a corrente.
+        # o controlo é igual em NAVEGAR e CHEGOU; em CHEGOU se parássemos os
+        # motores a corrente levava o barco
         desejada_x, desejada_y = velocidade_desejada(
             posicao.x, posicao.y, objetivo_x, objetivo_y,
             self.param('ganho_velocidade'), self.param('velocidade_max'))
-        # Proa para vd + k·(vd − v): anula a derrapagem lateral e a corrente.
+        # em vez de apontar só para o objetivo, aponta para vd + k*(vd - v).
+        # Assim compensa o escorregar de lado e a corrente. Só com controlo de
+        # rumo o barco ficava às voltas ao objetivo (foi o que aconteceu ao início).
         ganho = self.param('ganho_correcao')
         medida_x, medida_y = self.velocidade_medida
         avanco, rotacao = comando_vetorial(
@@ -152,7 +180,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        # Com SIGTERM o contexto pode já estar fechado.
+        # com SIGTERM (ctrl+c no launch) o rclpy às vezes já fechou e dava erro
         if rclpy.ok():
             node.publicar_velocidade(0.0, 0.0)
         node.destroy_node()
@@ -160,193 +188,5 @@ def main():
             rclpy.shutdown()
 
 
-
-#------------------------------------------------------------------------
-
-
-from math import atan2, cos, pi, sqrt
-import rclpy
-
-from rclpy.node import Node
-
-from rclpy.qos import DurabilityPolicy, QoSProfile
-# Para configurar a QoS (Quality of Service) do tópico /posicao.
-
-from geometry_msgs.msg import PointStamped   # ponto (x, y, z) + cabeçalho (referencial e tempo)
-from nav_msgs.msg import Odometry            # posição, orientação e velocidade de um robô
-from std_msgs.msg import Bool, Float64  
-
-
-def euclidean_distance(x, y, gx, gy):
-    """Distância em linha reta do barco (x, y) ao destino (gx, gy)."""
-    return sqrt((gx - x) ** 2 + (gy - y) ** 2)
-
-
-def steering_angle(x, y, gx, gy):
-    """Ângulo, no referencial do mundo, da linha que vai do barco ao destino."""
-    return atan2(gy - y, gx - x)
-
-
-def normalizar_angulo(a):
-    """Põe um ângulo no intervalo [-pi, pi] para que o barco não ande Às voltas e faça um trajecto mais pequeno""" # alteração ao tuturial do ros go to
-    while a > pi:          # se passou de +180°...
-        a -= 2 * pi        # ...subtrai uma volta (360°)
-    while a < -pi:         # se passou de -180°...
-        a += 2 * pi        # ...soma uma volta
-    return a
-
-
-def linear_vel(distancia, erro_rumo, ganho, vel_max):
-    """Avanço desejado (m/s)."""
-    v = min(ganho * distancia, vel_max)
-    # Controlo proporcional (como no tutorial): quanto mais longe, mais depressa.
-    # O min() limita a vel_max (correção: sem limite, a 200 m pedia 60 m/s).
-    return v * max(0.0, cos(erro_rumo))
-    # Correção: multiplica pelo cosseno do erro de rumo.
-    #   erro = 0°        → cos = 1    → avanço total (aponta ao destino)
-    #   erro = 60°       → cos = 0.5  → metade do avanço
-    #   erro ≥ 90°       → cos ≤ 0    → max(0, ...) = 0 → não avança, só roda
-    # Assim o barco roda primeiro no sítio e não faz curvas enormes.
-
-
-def angular_vel(erro_rumo, ganho, rot_max):
-    """Rotação desejada (rad/s)."""
-    return max(-rot_max, min(rot_max, ganho * erro_rumo))
-    # Sinal: erro positivo (destino à esquerda) → rotação positiva (roda à esquerda).
-
-
-
-
-class BarcoMissao(Node):
-
-    def __init__(self):
-        super().__init__('barco_missao') #inicializar o nó 
-
-        # ---------- Parâmetros ----------
-        # Declaro os parâmtros para os poder alterar sem mudar o código 
-        self.declare_parameter('barco', 'barco_1')    # nome do modelo no Gazebo
-        self.declare_parameter('tolerancia', 2.0)     # m: abaixo disto, "cheguei"
-        self.declare_parameter('ganho_lin', 0.3)      # (m/s) por metro de distância
-        self.declare_parameter('vel_max', 2.0)        # m/s (relativa à água)
-        self.declare_parameter('ganho_ang', 1.0)      # (rad/s) por radiano de erro
-        self.declare_parameter('rot_max', 0.5)        # rad/s
-        barco = self.get_parameter('barco').value     # lê o valor barco_1 
-
-        qos_posicao = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL) # define as regras para a apresetação dos dados.
-        # depth=1 dá apenas o ultimo valor lido
-        #durability: Transcient_local dá ol ultimos valores obtidos antes de o topico ser publicado
-
-        #tópicos que vai subscrever 
-
-        self.create_subscription(PointStamped, '/posicao', self.on_posicao, qos_posicao) # subscreve se ao tópico para obter a posição
-
-        self.create_subscription(Odometry, f'/model/{barco}/odometry', self.on_odom, 10) # dá a propria posição, velocidade e para onde aponta o barco
-
-        #tópicos que vai publicar
-         
-        motor = f'/model/{barco}/joint/{{}}_engine_propeller_joint/cmd_thrust'
-        self.pub_esq = self.create_publisher(Float64, motor.format('left'), 10)   # vira o motor para a esquerda
-        self.pub_dir = self.create_publisher(Float64, motor.format('right'), 10)  # vira o motor para a direira 
-        self.pub_cheguei = self.create_publisher(Bool, '/cheguei', 10)            # publica a dizer que chegou ao seu destino 
-
-
-        # ---------- Estado interno ----------
-        self.pose = None        # (x, y, rumo) do barco; None até chegar a 1.ª odometria
-        self.destino = None     # (x, y) do destino; None até o drone enviar algum
-        self.a_navegar = False  # True enquanto está a caminho de um destino
-
-        self.create_timer(0.1, self.ciclo_controlo)
-
-    def on_odom(self, msg):
-        """Chamado a cada mensagem de odometria dá a posição """
-        p = msg.pose.pose
-        self.pose = (p.position.x, p.position.y, yaw_de_quaternion(p.orientation))  
-
-    def on_posicao(self, msg):
-        """Chamado quando o drone publica um destino."""
-        if msg.header.frame_id not in ('', 'world'):
-            # Proteção: os números só fazem sentido se estiverem no referencial do
-            # mundo, que é o mesmo da odometria. Se vierem noutro, ignora.
-            self.get_logger().warn(
-                f'Destino no referencial "{msg.header.frame_id}"; esperava "world". Ignorado.')
-            return
-
-    
-        novo = (msg.point.x, msg.point.y)       # z ignorado: estamos à superfície
-        tol = self.get_parameter('tolerancia').value #pega no tolerancia definida anteriormente
-
-
-        if self.pose and euclidean_distance(self.pose[0], self.pose[1], *novo) <= tol:
-            return
-
-        if not self.a_navegar:
-            self.get_logger().info(f'Novo destino: x={novo[0]:.1f}, y={novo[1]:.1f}')  '''perceber esta linha'''
-        self.destino = novo         # atualiza o destino 
-        self.a_navegar = True       # volta a ativar o esta
-
-     def ciclo_controlo(self):
-        if not self.a_navegar or self.pose is None: # se não está a navegar então não entra nesta função
-            return
-
-        x, y, rumo = self.pose      # dá me as posições do barco separadas
-        gx, gy = self.destino       # posições de destino tmb separadas
-        tol = self.get_parameter('tolerancia').value  # vai-me buscar a tolerancia que defini anteriormente
-
-        distancia = euclidean_distance(x, y, gx, gy) # diz me a distância em linha reta ao alvo
-        if distancia <= tol:
-            # ----- Chegou -----
-            self.parar_motores()                         # motores a zero
-            self.a_navegar = False                       # deixa de navegar
-            self.pub_cheguei.publish(Bool(data=True))    # avisa o drone
-            self.get_logger().info(f'Cheguei (a {distancia:.1f} m do destino).')
-            return
-
-        # ----- Ainda a caminho -----
-        erro_rumo = normalizar_angulo(steering_angle(x, y, gx, gy) - rumo) #dá me o ângulo para onde deveria apontar. ângulo até ao destino menos o ângulo para onde aponta
-
-        u = linear_vel(distancia, erro_rumo,
-                       self.get_parameter('ganho_lin').value,
-                       self.get_parameter('vel_max').value)
-        # Avanço desejado. Os parâmetros são lidos em cada ciclo, por isso podes
-        # afiná-los com o nó a correr:  ros2 param set /barco_missao ganho_lin 0.5
-
-        r = angular_vel(erro_rumo,
-                        self.get_parameter('ganho_ang').value,
-                        self.get_parameter('rot_max').value)
-        # Rotação desejada.
-
-        f_esq, f_dir = forca_motores(u, r)               # converte em forças
-        self.pub_esq.publish(Float64(data=f_esq))        # envia ao motor esquerdo
-        self.pub_dir.publish(Float64(data=f_dir))        # envia ao motor direito
-        # Os motores mantêm a última força recebida, por isso o ciclo tem de
-        # continuar a publicar enquanto navega.
-
-    def parar_motores(self):
-        self.pub_esq.publish(Float64(data=0.0))
-        self.pub_dir.publish(Float64(data=0.0))
-
-    def main(args=None):
-    rclpy.init(args=args)       # inicializa o ROS 2 neste processo
-    node = BarcoMissao()        # cria o nó (corre o __init__)
-    try:
-        rclpy.spin(node)
-        # "spin" = fica em ciclo à espera de mensagens e timers e chama os
-        # callbacks. Só sai com Ctrl+C.
-    except KeyboardInterrupt:
-        pass                    # Ctrl+C: sai sem mostrar o erro
-    finally:
-        # Corre sempre ao sair (com Ctrl+C ou com erro):
-        node.parar_motores()    # segurança: não deixar o barco com os motores ligados
-        node.destroy_node()     # liberta os recursos do nó
-        rclpy.shutdown()        # fecha o ROS 2 neste processo
-
-
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-    
