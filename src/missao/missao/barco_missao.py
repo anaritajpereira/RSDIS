@@ -36,8 +36,9 @@ class BarcoMissao(Node):
         for nome, valor in parametros.items():
             self.declare_parameter(nome, valor)
 
-        barco = self.p('barco')
-        self.pub_cmd = self.create_publisher(Twist, f'/{barco}/cmd_vel', 10)
+        barco = self.param('barco')
+        self.pub_velocidade = self.create_publisher(
+            Twist, f'/{barco}/cmd_vel', 10)
         self.pub_estado = self.create_publisher(String, f'/{barco}/estado', 10)
         self.create_subscription(
             PoseStamped, f'/{barco}/pose_mundo', self.ao_receber_pose, 10)
@@ -45,37 +46,40 @@ class BarcoMissao(Node):
             PointStamped, f'/{barco}/objetivo', self.ao_receber_objetivo, 10)
 
         self.pose = None
-        self.t_pose = None
-        self.anterior = None
-        self.velocidade = (0.0, 0.0)
+        self.instante_pose = None
+        self.pose_anterior = None
+        self.velocidade_medida = (0.0, 0.0)
         self.objetivo = None
         self.estado = AGUARDAR
-        self.create_timer(1.0 / self.p('frequencia'), self.ciclo)
+        self.create_timer(1.0 / self.param('frequencia'), self.ciclo)
         self.get_logger().info(f'Pronto; objetivos em /{barco}/objetivo')
 
-    def p(self, nome):
+    def param(self, nome):
         return self.get_parameter(nome).value
 
-    def mudar_estado(self, novo):
-        self.get_logger().info(f'{self.estado} -> {novo}')
-        self.estado = novo
+    def mudar_estado(self, novo_estado):
+        self.get_logger().info(f'{self.estado} -> {novo_estado}')
+        self.estado = novo_estado
 
     def ao_receber_pose(self, msg):
         self.pose = msg.pose
-        self.t_pose = self.get_clock().now()
+        self.instante_pose = self.get_clock().now()
 
         # O casco tem muita inércia e escorrega de lado: o controlo usa a velocidade medida.
-        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        instante = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         x, y = msg.pose.position.x, msg.pose.position.y
-        if self.anterior is not None:
-            xa, ya, ta = self.anterior
-            dt = t - ta
-            if dt > 0.0:
-                a = self.p('filtro_velocidade')
-                vx, vy = self.velocidade
-                self.velocidade = (a * (x - xa) / dt + (1 - a) * vx,
-                                   a * (y - ya) / dt + (1 - a) * vy)
-        self.anterior = (x, y, t)
+        if self.pose_anterior is not None:
+            x_anterior, y_anterior, instante_anterior = self.pose_anterior
+            intervalo = instante - instante_anterior
+            if intervalo > 0.0:
+                peso_novo = self.param('filtro_velocidade')
+                vel_x, vel_y = self.velocidade_medida
+                self.velocidade_medida = (
+                    peso_novo * (x - x_anterior) / intervalo
+                    + (1 - peso_novo) * vel_x,
+                    peso_novo * (y - y_anterior) / intervalo
+                    + (1 - peso_novo) * vel_y)
+        self.pose_anterior = (x, y, instante)
 
     def ao_receber_objetivo(self, msg):
         self.objetivo = (msg.point.x, msg.point.y)
@@ -87,8 +91,9 @@ class BarcoMissao(Node):
     def pose_valida(self):
         if self.pose is None:
             return False
-        idade = (self.get_clock().now() - self.t_pose).nanoseconds * 1e-9
-        return idade < self.p('timeout_pose')
+        idade_pose = (self.get_clock().now()
+                      - self.instante_pose).nanoseconds * 1e-9
+        return idade_pose < self.param('timeout_pose')
 
     def ciclo(self):
         self.pub_estado.publish(String(data=self.estado))
@@ -96,45 +101,47 @@ class BarcoMissao(Node):
             if self.objetivo is not None:
                 self.get_logger().warning('Sem pose recente do barco',
                                           throttle_duration_sec=5.0)
-            self.publicar(0.0, 0.0)
+            self.publicar_velocidade(0.0, 0.0)
             return
 
-        pos = self.pose.position
-        o = self.pose.orientation
-        alvo_x, alvo_y = self.objetivo
-        distancia = math.hypot(alvo_x - pos.x, alvo_y - pos.y)
+        posicao = self.pose.position
+        orientacao = self.pose.orientation
+        objetivo_x, objetivo_y = self.objetivo
+        distancia = math.hypot(objetivo_x - posicao.x, objetivo_y - posicao.y)
 
-        if self.estado == NAVEGAR and distancia < self.p('tolerancia_chegada'):
+        if self.estado == NAVEGAR and distancia < self.param('tolerancia_chegada'):
             self.mudar_estado(CHEGOU)
         elif (self.estado == CHEGOU and distancia
-              > self.p('tolerancia_chegada') + self.p('histerese')):
+              > self.param('tolerancia_chegada') + self.param('histerese')):
             self.mudar_estado(NAVEGAR)
 
         # O controlo é o mesmo nos dois estados: em CHEGOU continua a segurar o
         # ponto contra a corrente.
-        vdx, vdy = velocidade_desejada(
-            pos.x, pos.y, alvo_x, alvo_y, self.p('ganho_velocidade'),
-            self.p('velocidade_max'))
+        desejada_x, desejada_y = velocidade_desejada(
+            posicao.x, posicao.y, objetivo_x, objetivo_y,
+            self.param('ganho_velocidade'), self.param('velocidade_max'))
         # Proa para vd + k·(vd − v): anula a derrapagem lateral e a corrente.
-        k = self.p('ganho_correcao')
-        vx, vy = self.velocidade
+        ganho = self.param('ganho_correcao')
+        medida_x, medida_y = self.velocidade_medida
         avanco, rotacao = comando_vetorial(
-            yaw_de_quaternion(o.x, o.y, o.z, o.w),
-            vdx + k * (vdx - vx), vdy + k * (vdy - vy),
-            self.p('ganho_rumo'), self.p('velocidade_max'),
-            self.p('rotacao_max'), self.p('erro_rumo_max'),
-            self.p('velocidade_minima'))
-        self.publicar(avanco, rotacao)
+            yaw_de_quaternion(orientacao.x, orientacao.y, orientacao.z,
+                              orientacao.w),
+            desejada_x + ganho * (desejada_x - medida_x),
+            desejada_y + ganho * (desejada_y - medida_y),
+            self.param('ganho_rumo'), self.param('velocidade_max'),
+            self.param('rotacao_max'), self.param('erro_rumo_max'),
+            self.param('velocidade_minima'))
+        self.publicar_velocidade(avanco, rotacao)
 
         self.get_logger().info(
             f'{self.estado}: distância {distancia:.1f} m',
             throttle_duration_sec=5.0)
 
-    def publicar(self, avanco, rotacao):
-        cmd = Twist()
-        cmd.linear.x = avanco
-        cmd.angular.z = rotacao
-        self.pub_cmd.publish(cmd)
+    def publicar_velocidade(self, avanco, rotacao):
+        comando = Twist()
+        comando.linear.x = avanco
+        comando.angular.z = rotacao
+        self.pub_velocidade.publish(comando)
 
 
 def main():
@@ -147,7 +154,7 @@ def main():
     finally:
         # Com SIGTERM o contexto pode já estar fechado.
         if rclpy.ok():
-            node.publicar(0.0, 0.0)
+            node.publicar_velocidade(0.0, 0.0)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

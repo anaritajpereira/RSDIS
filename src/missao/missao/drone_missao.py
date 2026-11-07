@@ -45,8 +45,9 @@ class DroneMissao(Node):
         for nome, valor in parametros.items():
             self.declare_parameter(nome, valor)
 
-        drone = self.p('drone')
-        self.pub_cmd = self.create_publisher(Twist, f'/{drone}/cmd_vel', 10)
+        drone = self.param('drone')
+        self.pub_velocidade = self.create_publisher(
+            Twist, f'/{drone}/cmd_vel', 10)
         self.pub_estado = self.create_publisher(String, f'/{drone}/estado', 10)
         self.create_subscription(
             PoseStamped, f'/{drone}/pose_mundo', self.ao_receber_pose, 10)
@@ -54,25 +55,25 @@ class DroneMissao(Node):
             PointStamped, f'/{drone}/objetivo', self.ao_receber_objetivo, 10)
 
         self.pose = None
-        self.t_pose = None
+        self.instante_pose = None
         self.objetivo = None
-        self.t_chegada = None
+        self.instante_chegada = None
         self.ja_voou = False
         self.estado = POUSADO
-        self.create_timer(1.0 / self.p('frequencia'), self.ciclo)
+        self.create_timer(1.0 / self.param('frequencia'), self.ciclo)
         self.get_logger().info(f'Pronto; objetivos em /{drone}/objetivo')
 
-    def p(self, nome):
+    def param(self, nome):
         return self.get_parameter(nome).value
 
-    def mudar_estado(self, novo):
-        self.get_logger().info(f'{self.estado} -> {novo}')
-        self.estado = novo
-        self.t_chegada = None
+    def mudar_estado(self, novo_estado):
+        self.get_logger().info(f'{self.estado} -> {novo_estado}')
+        self.estado = novo_estado
+        self.instante_chegada = None
 
     def ao_receber_pose(self, msg):
         self.pose = msg.pose
-        self.t_pose = self.get_clock().now()
+        self.instante_pose = self.get_clock().now()
 
     def ao_receber_objetivo(self, msg):
         self.objetivo = (msg.point.x, msg.point.y)
@@ -86,88 +87,96 @@ class DroneMissao(Node):
     def pose_valida(self):
         if self.pose is None:
             return False
-        idade = (self.get_clock().now() - self.t_pose).nanoseconds * 1e-9
-        return idade < self.p('timeout_pose')
+        idade_pose = (self.get_clock().now()
+                      - self.instante_pose).nanoseconds * 1e-9
+        return idade_pose < self.param('timeout_pose')
 
     def ciclo(self):
         self.pub_estado.publish(String(data=self.estado))
         if not self.pose_valida():
             self.get_logger().warning('Sem pose recente do drone',
                                       throttle_duration_sec=5.0)
-            self.publicar(0.0, 0.0, 0.0, 0.0)
+            self.publicar_velocidade(0.0, 0.0, 0.0, 0.0)
             return
 
-        pos = self.pose.position
-        o = self.pose.orientation
-        yaw = yaw_de_quaternion(o.x, o.y, o.z, o.w)
-        altitude = self.p('altitude')
+        posicao = self.pose.position
+        orientacao = self.pose.orientation
+        rumo = yaw_de_quaternion(orientacao.x, orientacao.y, orientacao.z,
+                                 orientacao.w)
+        altitude = self.param('altitude')
 
         if self.estado == POUSADO:
             # Com os motores já ligados, velocidade zero deixa-o pairar e subir aos poucos.
-            vz = -self.p('velocidade_aterrar') if self.ja_voou else 0.0
-            self.publicar(0.0, 0.0, vz, 0.0)
+            vel_vertical = -self.param('velocidade_aterrar') if self.ja_voou else 0.0
+            self.publicar_velocidade(0.0, 0.0, vel_vertical, 0.0)
 
         elif self.estado == DESCOLAR:
             self.ja_voou = True
-            vz = saturar(self.p('ganho_altitude') * (altitude - pos.z),
-                         self.p('velocidade_vertical'))
-            self.publicar(0.0, 0.0, vz, 0.0)
-            if abs(altitude - pos.z) < self.p('tolerancia_altitude'):
+            vel_vertical = saturar(
+                self.param('ganho_altitude') * (altitude - posicao.z),
+                self.param('velocidade_vertical'))
+            self.publicar_velocidade(0.0, 0.0, vel_vertical, 0.0)
+            if abs(altitude - posicao.z) < self.param('tolerancia_altitude'):
                 self.mudar_estado(IR)
 
         elif self.estado == IR:
-            if self.voar_para(self.objetivo, altitude, pos, yaw):
+            if self.voar_para(self.objetivo, altitude, posicao, rumo):
                 agora = self.get_clock().now()
-                if self.t_chegada is None:
-                    self.t_chegada = agora
+                if self.instante_chegada is None:
+                    self.instante_chegada = agora
                     self.get_logger().info('Objetivo atingido; a pairar')
-                pairado = (agora - self.t_chegada).nanoseconds * 1e-9
-                if pairado >= self.p('tempo_pairar'):
+                tempo_a_pairar = (agora - self.instante_chegada).nanoseconds * 1e-9
+                if tempo_a_pairar >= self.param('tempo_pairar'):
                     self.mudar_estado(REGRESSAR)
 
         elif self.estado == REGRESSAR:
-            base = (self.p('base_x'), self.p('base_y'))
-            if self.voar_para(base, altitude, pos, yaw):
+            base = (self.param('base_x'), self.param('base_y'))
+            if self.voar_para(base, altitude, posicao, rumo):
                 self.mudar_estado(ATERRAR)
 
         elif self.estado == ATERRAR:
-            vx, vy = self.velocidade_horizontal(
-                (self.p('base_x'), self.p('base_y')), pos)
-            self.publicar(vx, vy, -self.p('velocidade_aterrar'), 0.0, yaw)
-            if pos.z < self.p('altura_base') + self.p('margem_pouso'):
+            vel_x, vel_y = self.velocidade_horizontal(
+                (self.param('base_x'), self.param('base_y')), posicao)
+            self.publicar_velocidade(
+                vel_x, vel_y, -self.param('velocidade_aterrar'), 0.0, rumo)
+            if posicao.z < self.param('altura_base') + self.param('margem_pouso'):
                 self.mudar_estado(POUSADO)
 
-    def velocidade_horizontal(self, alvo, pos):
-        return velocidade_desejada(pos.x, pos.y, alvo[0], alvo[1],
-                                   self.p('ganho_posicao'),
-                                   self.p('velocidade_cruzeiro'))
+    def velocidade_horizontal(self, destino, posicao):
+        return velocidade_desejada(posicao.x, posicao.y, destino[0], destino[1],
+                                   self.param('ganho_posicao'),
+                                   self.param('velocidade_cruzeiro'))
 
-    def voar_para(self, alvo, altitude, pos, yaw):
-        """Comanda um passo em direção ao alvo; devolve True se já chegou."""
-        dx, dy = alvo[0] - pos.x, alvo[1] - pos.y
-        distancia = math.hypot(dx, dy)
-        vx, vy = self.velocidade_horizontal(alvo, pos)
-        vz = saturar(self.p('ganho_altitude') * (altitude - pos.z),
-                     self.p('velocidade_vertical'))
+    def voar_para(self, destino, altitude, posicao, rumo):
+        """Comanda um passo em direção ao destino; devolve True se já chegou."""
+        falta_x, falta_y = destino[0] - posicao.x, destino[1] - posicao.y
+        distancia = math.hypot(falta_x, falta_y)
+        vel_x, vel_y = self.velocidade_horizontal(destino, posicao)
+        vel_vertical = saturar(
+            self.param('ganho_altitude') * (altitude - posicao.z),
+            self.param('velocidade_vertical'))
 
-        # Perto do alvo o rumo pedido oscila muito; mantém-se o atual.
-        wz = 0.0
-        if distancia > self.p('distancia_rumo'):
-            erro = normalizar_angulo(math.atan2(dy, dx) - yaw)
-            wz = saturar(self.p('ganho_rumo') * erro, self.p('rotacao_max'))
+        # Perto do destino o rumo pedido oscila muito; mantém-se o atual.
+        vel_rotacao = 0.0
+        if distancia > self.param('distancia_rumo'):
+            erro_rumo = normalizar_angulo(math.atan2(falta_y, falta_x) - rumo)
+            vel_rotacao = saturar(self.param('ganho_rumo') * erro_rumo,
+                                  self.param('rotacao_max'))
 
-        self.publicar(vx, vy, vz, wz, yaw)
-        return (distancia < self.p('tolerancia_posicao')
-                and abs(altitude - pos.z) < self.p('tolerancia_altitude'))
+        self.publicar_velocidade(vel_x, vel_y, vel_vertical, vel_rotacao, rumo)
+        return (distancia < self.param('tolerancia_posicao')
+                and abs(altitude - posicao.z) < self.param('tolerancia_altitude'))
 
-    def publicar(self, vx, vy, vz, wz, yaw=0.0):
+    def publicar_velocidade(self, vel_x, vel_y, vel_vertical, vel_rotacao,
+                            rumo=0.0):
         """Publica uma velocidade dada no referencial do mundo."""
-        if self.p('cmd_vel_referencial') == 'corpo':
-            vx, vy = mundo_para_corpo(vx, vy, yaw)
-        cmd = Twist()
-        cmd.linear.x, cmd.linear.y, cmd.linear.z = vx, vy, vz
-        cmd.angular.z = wz
-        self.pub_cmd.publish(cmd)
+        if self.param('cmd_vel_referencial') == 'corpo':
+            vel_x, vel_y = mundo_para_corpo(vel_x, vel_y, rumo)
+        comando = Twist()
+        comando.linear.x, comando.linear.y = vel_x, vel_y
+        comando.linear.z = vel_vertical
+        comando.angular.z = vel_rotacao
+        self.pub_velocidade.publish(comando)
 
 
 def main():
@@ -180,7 +189,7 @@ def main():
     finally:
         # Com SIGTERM o contexto pode já estar fechado.
         if rclpy.ok():
-            node.publicar(0.0, 0.0, 0.0, 0.0)
+            node.publicar_velocidade(0.0, 0.0, 0.0, 0.0)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

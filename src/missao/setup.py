@@ -26,6 +26,7 @@ setup(
             'poses = missao.poses:main',
             'drone_missao = missao.drone_missao:main',
             'barco_missao = missao.barco_missao:main',
+            'detetor = missao.detetor:main',
         ],
     },
 )
