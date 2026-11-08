@@ -1,9 +1,19 @@
-# Ignorar tudo nesta pasta
-*
+# Ignorar tudo o que está na raiz do repositório (build/, install/, log/, metricas/...)
+/*
 
-# ...exceto estes ficheiros
+# ...exceto isto (o que está dentro destas pastas entra todo)
 !.gitignore
+!README.md
+!relatorio.pdf
+!ambiente/
 !oceano_corrente/
 !src/
 !teleop_twist_keyboard/
-!RelatorioEntrega
+!RelatorioEntrega/
+
+# lixo do Python dentro das pastas acima
+__pycache__/
+*.pyc
+
+# os testes não vão para o git
+src/missao/test/

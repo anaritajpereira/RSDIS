@@ -1,0 +1,9 @@
+# Posição estimada do alvo no referencial do mundo (m).
+float64 x
+float64 y
+---
+bool sucesso
+string mensagem
+---
+float64 distancia
+string estado

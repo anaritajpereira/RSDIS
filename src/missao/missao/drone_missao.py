@@ -1,12 +1,12 @@
-"""Máquina de estados do drone: busca em faixas, acompanhamento do alvo e regresso."""
+"""Máquina de estados do drone: busca, acompanhamento, recuperação do alvo e regresso."""
 import math
 
 from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from missao.geometria import (bateria_necessaria, espacamento_faixas,
                               mundo_para_corpo, normalizar_angulo,
-                              ponto_a_distancia, pontos_busca, saturar,
-                              velocidade_desejada, yaw_de_quaternion)
-from missao_interfaces.msg import DetecaoAlvo
+                              ponto_a_distancia, ponto_espiral, pontos_busca,
+                              saturar, velocidade_desejada, yaw_de_quaternion)
+from missao_interfaces.msg import DetecaoAlvo, EstimativaAlvo
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
@@ -17,11 +17,12 @@ DESCOLAR = 'DESCOLAR'
 IR = 'IR'
 BUSCAR = 'BUSCAR'
 ACOMPANHAR = 'ACOMPANHAR'
+RECUPERAR = 'RECUPERAR'
 REGRESSAR = 'REGRESSAR'
 ATERRAR = 'ATERRAR'
 
 # só nestes estados é que se verifica a bateria (em REGRESSAR/ATERRAR já vai para casa)
-ESTADOS_EM_VOO = (DESCOLAR, IR, BUSCAR, ACOMPANHAR)
+ESTADOS_EM_VOO = (DESCOLAR, IR, BUSCAR, ACOMPANHAR, RECUPERAR)
 
 
 def segundos(stamp):
@@ -55,8 +56,9 @@ class DroneMissao(Node):
             'cmd_vel_referencial': 'corpo',
             'timeout_pose': 1.0,
             'frequencia': 20.0,
-            # busca: se busca_automatica estiver a true descola logo e começa as faixas
-            'busca_automatica': True,
+            # busca: normalmente é o gestor_missao que manda começar (/drone/comando);
+            # com busca_automatica a true descola logo sozinho
+            'busca_automatica': False,
             'area_x_min': -120.0,
             'area_x_max': 120.0,
             'area_y_min': -120.0,
@@ -70,6 +72,13 @@ class DroneMissao(Node):
             'distancia_acompanhamento': 60.0,
             'confianca_min': 0.3,
             'tempo_perda_alvo': 3.0,
+            # recuperação: espiral à volta de onde o alvo deve estar (última
+            # estimativa + deriva * tempo), sempre virado para o centro
+            'raio_espiral_inicial': 60.0,
+            'passo_espiral': 30.0,  # quanto o raio cresce por volta
+            'raio_espiral_max': 180.0,  # depois disto desiste e volta às faixas
+            'passo_angular': 0.3,  # rad entre pontos da espiral
+            'tolerancia_espiral': 8.0,
             # bateria: ver verificar_bateria()
             'bateria_minima': 0.15,
             'margem_bateria': 0.05,
@@ -89,6 +98,10 @@ class DroneMissao(Node):
         self.create_subscription(
             DetecaoAlvo, '/alvo/detecao', self.ao_receber_detecao, 10)
         self.create_subscription(
+            EstimativaAlvo, '/alvo/estimativa', self.ao_receber_estimativa, 10)
+        self.create_subscription(
+            String, f'/{drone}/comando', self.ao_receber_comando, 10)
+        self.create_subscription(
             BatteryState, f'/model/{drone}/battery/linear_battery/state',
             self.ao_receber_bateria, 10)
 
@@ -106,6 +119,11 @@ class DroneMissao(Node):
         self.pontos_visitados = 0
         self.alvo = None
         self.instante_detecao = None
+        # última estimativa do alvo: (x, y, vx, vy, instante em s)
+        self.estimativa = None
+        self.angulo_espiral = 0.0
+        self.angulo_espiral_inicial = 0.0
+        self.pedido_busca = False
 
         self.bateria = None
         self.instante_bateria = None
@@ -113,7 +131,8 @@ class DroneMissao(Node):
         self.bateria_baixa = False
 
         self.create_timer(1.0 / self.param('frequencia'), self.ciclo)
-        self.get_logger().info(f'Pronto; objetivos manuais em /{drone}/objetivo')
+        self.get_logger().info(
+            f'Pronto; comandos em /{drone}/comando, objetivos manuais em /{drone}/objetivo')
 
     def param(self, nome):
         return self.get_parameter(nome).value
@@ -151,6 +170,23 @@ class DroneMissao(Node):
             return
         self.alvo = (msg.x, msg.y)
         self.instante_detecao = self.agora()
+
+    def ao_receber_estimativa(self, msg):
+        self.estimativa = (msg.x, msg.y, msg.vx, msg.vy, segundos(msg.header.stamp))
+
+    def ao_receber_comando(self, msg):
+        # o gestor reenvia o mesmo comando até ver o estado mudar, por isso
+        # aqui ignoram-se os repetidos sem fazer barulho
+        comando = msg.data.strip().lower()
+        if comando == 'buscar':
+            if self.estado == POUSADO and not self.missao_iniciada:
+                self.pedido_busca = True
+        elif comando == 'regressar':
+            if self.estado in ESTADOS_EM_VOO:
+                self.get_logger().info('Hand-off: o robô marítimo já está com o alvo, a regressar')
+                self.mudar_estado(REGRESSAR)
+        else:
+            self.get_logger().warning(f'Comando desconhecido: {msg.data}')
 
     def ao_receber_bateria(self, msg):
         if msg.capacity <= 0.0 or math.isnan(msg.charge):
@@ -207,7 +243,8 @@ class DroneMissao(Node):
             # com velocidade 0 os motores ainda o levantam aos poucos
             vel_vertical = -self.param('velocidade_aterrar') if self.ja_voou else 0.0
             self.publicar_velocidade(0.0, 0.0, vel_vertical, 0.0)
-            if self.param('busca_automatica') and not self.missao_iniciada:
+            arrancar = self.pedido_busca or self.param('busca_automatica')
+            if arrancar and not self.missao_iniciada:
                 self.missao_iniciada = True
                 self.estado_apos_descolar = BUSCAR
                 self.mudar_estado(DESCOLAR)
@@ -245,11 +282,9 @@ class DroneMissao(Node):
 
         elif self.estado == ACOMPANHAR:
             if not self.alvo_recente():
-                self.get_logger().info('Alvo perdido; a retomar a busca')
-                # retoma na faixa mais perto em vez de voltar à primeira
-                self.indice_busca = self.inicio_de_faixa_mais_proximo(posicao)
-                self.pontos_visitados = 0
-                self.mudar_estado(BUSCAR)
+                self.get_logger().info('Alvo perdido; a procurar à volta de onde devia estar')
+                self.preparar_recuperacao(posicao)
+                self.mudar_estado(RECUPERAR)
                 return
             # ponto a 60 m do alvo do lado onde o drone já está, assim não dá voltas
             destino = ponto_a_distancia(
@@ -258,6 +293,13 @@ class DroneMissao(Node):
             rumo_para_alvo = math.atan2(self.alvo[1] - posicao.y,
                                         self.alvo[0] - posicao.x)
             self.voar_para(destino, altitude, posicao, rumo, rumo_para_alvo)
+
+        elif self.estado == RECUPERAR:
+            if self.alvo_recente():
+                self.get_logger().info('Alvo reencontrado')
+                self.mudar_estado(ACOMPANHAR)
+                return
+            self.seguir_espiral(altitude, posicao, rumo)
 
         elif self.estado == REGRESSAR:
             if self.voar_para(base, altitude, posicao, rumo):
@@ -301,6 +343,46 @@ class DroneMissao(Node):
             # deu a volta a todos os pontos e não encontrou nada, recomeça
             if self.pontos_visitados % len(self.pontos_busca) == 0:
                 self.get_logger().info('Área toda varrida; a recomeçar a busca')
+
+    def centro_recuperacao(self):
+        """Onde o alvo deve estar agora: última estimativa mais a deriva desde então."""
+        if self.estimativa is None:
+            # sem estimativa, o melhor que temos é a última deteção (parada)
+            return self.alvo
+        x, y, vx, vy, instante = self.estimativa
+        decorrido = max(0.0, segundos(self.agora().to_msg()) - instante)
+        return x + vx * decorrido, y + vy * decorrido
+
+    def preparar_recuperacao(self, posicao):
+        centro = self.centro_recuperacao()
+        # começa a espiral no ângulo onde o drone já está, para não atravessar o centro
+        self.angulo_espiral = math.atan2(posicao.y - centro[1], posicao.x - centro[0])
+        self.angulo_espiral_inicial = self.angulo_espiral
+
+    def raio_espiral(self):
+        voltas = (self.angulo_espiral - self.angulo_espiral_inicial) / (2.0 * math.pi)
+        return self.param('raio_espiral_inicial') + self.param('passo_espiral') * voltas
+
+    def seguir_espiral(self, altitude, posicao, rumo):
+        if self.raio_espiral() > self.param('raio_espiral_max'):
+            self.get_logger().info('Espiral sem sucesso; a voltar à busca em faixas')
+            self.indice_busca = self.inicio_de_faixa_mais_proximo(posicao)
+            self.pontos_visitados = 0
+            self.mudar_estado(BUSCAR)
+            return
+        # o centro anda com a deriva, por isso é recalculado sempre
+        centro_x, centro_y = self.centro_recuperacao()
+        destino = ponto_espiral(centro_x, centro_y, self.angulo_espiral,
+                                self.raio_espiral())
+        # a câmara é frontal: olha sempre para o centro da espiral
+        rumo_para_centro = math.atan2(centro_y - posicao.y, centro_x - posicao.x)
+        self.voar_para(destino, altitude, posicao, rumo, rumo_para_centro)
+        if math.hypot(destino[0] - posicao.x,
+                      destino[1] - posicao.y) < self.param('tolerancia_espiral'):
+            self.angulo_espiral += self.param('passo_angular')
+            self.get_logger().info(
+                f'Espiral: raio {self.raio_espiral():.0f} m à volta de '
+                f'({centro_x:.1f}, {centro_y:.1f})', throttle_duration_sec=5.0)
 
     def verificar_bateria(self, posicao, base):
         if self.bateria is None:

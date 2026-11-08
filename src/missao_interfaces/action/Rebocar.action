@@ -1,0 +1,10 @@
+# Zona de entrega no referencial do mundo (m): o robô marítimo leva o alvo até aqui.
+float64 x
+float64 y
+---
+bool sucesso
+string mensagem
+---
+# Distância (m) que falta: ao ponto de engate em ENGATAR, do robô à zona em REBOCAR.
+float64 distancia
+string estado

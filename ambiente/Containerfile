@@ -1,0 +1,21 @@
+# Ambiente do projeto: Ubuntu 20.04, ROS 2 Galactic, Ignition Fortress e MBZIRC.
+#
+# Construir e criar a distrobox (a partir da raiz do repositório):
+#   podman build -t mbzirc_corrigido -f ambiente/Containerfile ambiente
+#   distrobox create --name mbzirc --image localhost/mbzirc_corrigido:latest --nvidia
+# Com Docker: "docker build" com os mesmos argumentos; sem placa NVIDIA, tirar o --nvidia.
+#
+# Dentro da box, carregar o ambiente com:
+#   source /opt/ros/galactic/setup.bash
+#   source /home/developer/mbzirc_ws/install/setup.bash
+FROM docker.io/osrf/mbzirc:mbzirc_sim_latest
+
+USER root
+
+# Os repositórios do ROS e da OSRF de 2022 já não validam e fazem falhar o apt
+# (e a inicialização da distrobox); o que é preciso deles já vem na imagem.
+RUN cd /etc/apt/sources.list.d \
+ && for f in *.list; do mv "$f" "$f.disabled"; done \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends python3-opencv \
+ && rm -rf /var/lib/apt/lists/*
