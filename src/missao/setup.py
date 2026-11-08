@@ -31,6 +31,7 @@ setup(
             'estimativa_deriva = missao.estimativa_deriva:main',
             'gestor_missao = missao.gestor_missao:main',
             'registo_metricas = missao.registo_metricas:main',
+            'analisar_missao = missao.analisar_missao:main',
         ],
     },
 )

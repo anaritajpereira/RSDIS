@@ -9,6 +9,7 @@
 !oceano_corrente/
 !src/
 !teleop_twist_keyboard/
+!metricas
 
 # lixo do Python dentro das pastas acima
 __pycache__/

@@ -1,0 +1,39 @@
+Análise da missão: 20261108_202457_perseguir
+Modo de interceção: perseguir
+
+Linha do tempo (tempo simulado)
+      0.4 s  missão arrancou
+      1.0 s  drone a descolar
+     14.2 s  drone a procurar
+     50.9 s  alvo detetado
+     54.4 s  pedido de resgate
+     81.6 s  robô confirmou o alvo
+     81.7 s  hand-off
+    100.6 s  alvo preso (início do reboque)
+    117.1 s  alvo entregue
+    139.4 s  drone em terra
+    140.4 s  missão concluída
+
+Durações
+  procura (descolar até detetar): 49.9 s
+  resgate (pedido até confirmar): 27.2 s
+  engate: 18.9 s
+  reboque: 16.5 s
+  missão completa: 140.0 s
+
+Perceção
+  erro da deteção:    média 2.08 m, mediana 1.92 m, máx 3.12 m (36 amostras)
+  erro da estimativa: média 1.72 m, mediana 1.54 m, máx 3.03 m (37 amostras)
+  deriva estimada (última): (0.51, 0.03) m/s
+  deriva real (antes do engate): (0.49, 0.01) m/s
+  vezes que o drone perdeu o alvo (RECUPERAR): 0
+
+Robô marítimo
+  distância mínima ao alvo: 14.1 m
+  a segurar o alvo durante 38 s
+  robô à zona de entrega: média 1.72 m, mediana 1.33 m, máx 6.72 m (38 amostras)
+  alvo à zona de entrega: média 18.84 m, mediana 18.73 m, máx 23.49 m (38 amostras)
+
+Bateria do drone: 100% no início, 91% no fim
+
+Resultado: CONCLUIDA

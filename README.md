@@ -95,6 +95,25 @@ Cada execução grava dois ficheiros em `metricas/`:
 - `<data>_<modo>_eventos.csv`: o instante de cada mudança de estado do gestor, do drone e do robô;
 - `<data>_<modo>_parametros.yaml`: uma cópia do ficheiro de parâmetros usado, para cada resultado ficar com os parâmetros que o geraram.
 
+**Analisar uma missão.** O `analisar_missao` lê os CSV e escreve um resumo com:
+- a linha do tempo;
+- as durações (procura, resgate, engate e reboque);
+- o erro da deteção e da estimativa;
+- a deriva estimada contra a real;
+- quantas vezes o drone perdeu o alvo;
+- a distância do robô e do alvo à zona de entrega;
+- a bateria.
+
+Corre na raiz do repositório:
+
+```bash
+ros2 run missao analisar_missao                      # última execução em metricas/
+ros2 run missao analisar_missao metricas/<ficheiro>_metricas.csv
+ros2 run missao analisar_missao --todas              # tabela com todas as execuções (ex.: intercetar vs perseguir)
+```
+
+O resumo aparece no terminal e fica guardado junto aos CSV, em `<execução>_analise.txt`. Com `--todas`, a tabela fica em `metricas/comparacao.txt`.
+
 **Outros testes úteis:**
 
 - **Regra da bateria:** com o drone em `ACOMPANHAR`, força o regresso com `ros2 param set /drone_missao bateria_minima 0.95`. O drone escreve "Bateria a …: a regressar" e o robô continua a missão sozinho.

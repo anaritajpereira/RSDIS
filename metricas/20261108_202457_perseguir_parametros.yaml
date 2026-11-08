@@ -1,0 +1,82 @@
+# Parâmetros da missão que costumamos afinar.
+#
+# Os valores por omissão estão no código de cada nó; aqui só ficam os que
+# interessa ter à mão. Um parâmetro que não esteja aqui usa o valor do código.
+# Depois de editar este ficheiro é preciso correr o colcon build outra vez,
+# porque o launch usa a cópia que fica no install/.
+# Para usar outro ficheiro (aí não é preciso recompilar):
+#   ros2 launch missao missao.launch.py parametros:=/caminho/para/outro.yaml
+#
+# Atenção aos tipos: um parâmetro decimal tem de levar ponto (20.0 e não 20),
+# senão o nó recusa-o por ser inteiro.
+#
+# modo_intercecao, busca_automatica e reboque não estão aqui porque vêm dos
+# argumentos do launch.
+
+# "/**" vale para todos os nós (cada nó só usa os parâmetros que conhece)
+/**:
+  ros__parameters:
+    # zona para onde o robô marítimo reboca o alvo (fase 4): por omissão é de
+    # onde o robô sai. Usada pelo gestor_missao e pelo registo_metricas.
+    zona_entrega_x: 15.0
+    zona_entrega_y: 10.0
+
+detetor:
+  ros__parameters:
+    # cores do vermelho em HSV (matiz de 0 a 180 no OpenCV)
+    matiz_baixa_max: 10
+    matiz_alta_min: 170
+    saturacao_min: 100
+    valor_min: 50
+    area_min: 30.0              # px; abaixo disto não conta como alvo
+    altura_plano: 1.2           # m; o painel está a ~1.2 m da água
+    distancia_max: 300.0
+    publicar_depuracao: false   # true para ver a máscara em /alvo/imagem_depuracao
+
+estimativa_deriva:
+  ros__parameters:
+    janela: 20.0                # s de deteções usadas na regressão
+    distancia_outlier: 6.0      # m
+    limite_residuo: 3.0         # m
+
+drone_missao:
+  ros__parameters:
+    altitude: 20.0
+    velocidade_cruzeiro: 4.0
+    base_x: 0.0
+    base_y: 0.0
+    # área de busca
+    area_x_min: -120.0
+    area_x_max: 120.0
+    area_y_min: -120.0
+    area_y_max: 120.0
+    sobreposicao: 0.2
+    distancia_acompanhamento: 60.0
+    tempo_perda_alvo: 3.0
+    # espiral de recuperação
+    raio_espiral_inicial: 60.0
+    passo_espiral: 30.0
+    raio_espiral_max: 180.0
+    # bateria: regressa com max(bateria_minima, necessária + margem_bateria)
+    bateria_minima: 0.15
+    margem_bateria: 0.05
+
+robo_maritimo_missao:
+  ros__parameters:
+    velocidade_max: 2.5
+    velocidade_max_perto: 1.5
+    distancia_seguranca: 20.0   # m ao centro do alvo (o barco à deriva tem ~22 m)
+    distancia_aproximar: 40.0
+    tolerancia_chegada: 5.0
+    tempo_confirmar: 5.0
+    # reboque
+    distancia_engate: 16.0      # m ao centro do alvo quando o prende
+    velocidade_reboque: 0.8     # m/s
+    avanco_max_reboque: 4.0     # "m/s" pedidos ao barco_teleop (~força máxima)
+    rotacao_max_reboque: 2.0    # rad/s pedidos para virar com o alvo preso
+    raio_entrega: 8.0           # entregue quando o robô chega a esta distância da zona
+    largar_na_entrega: false    # true = solta o alvo na zona (e a corrente leva-o)
+
+gestor_missao:
+  ros__parameters:
+    tentativas_resgate: 3

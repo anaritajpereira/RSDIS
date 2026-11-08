@@ -1,0 +1,4 @@
+execução                     modo         deteção  confirm.  entregue  concluída  erro det  erro est resultado
+--------------------------------------------------------------------------------------------------------------
+20261108_202106_intercetar   intercetar     50.9s     81.0s    121.9s     139.4s     2.03m     1.72m CONCLUIDA
+20261108_202457_perseguir    perseguir      50.9s     81.6s    117.1s     140.4s     2.08m     1.72m CONCLUIDA
